@@ -186,39 +186,36 @@ def init_database():
 
     db = SessionLocal()
 
-    try:
+try:
+    admin = (
+        db.query(User)
+        .filter_by(username="admin")
+        .first()
+    )
 
-        admin = (
-    db.query(User)
-    .filter_by(username="admin")
-    .first()
-)
+    admin_password = os.environ.get(
+        "ADMIN_PASSWORD",
+        "admin123"
+    )
 
-admin_password = os.environ.get(
-    "ADMIN_PASSWORD",
-    "admin123"
-)
+    if not admin:
+        admin = User(
+            username="admin",
+            password_hash=generate_password_hash(
+                admin_password
+            )
+        )
+        db.add(admin)
 
-if not admin:
-    admin = User(
-        username="admin",
-        password_hash=generate_password_hash(
+    else:
+        admin.password_hash = generate_password_hash(
             admin_password
         )
-    )
 
-    db.add(admin)
+    db.commit()
 
-else:
-    admin.password_hash = generate_password_hash(
-        admin_password
-    )
-
-db.commit()
-
-    finally:
-
-        db.close()
+finally:
+    db.close()
 
 
 # ============================================================
