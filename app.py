@@ -2,10 +2,11 @@ from flask import (
     Flask,
     render_template_string,
     request,
-    send_from_directory,
     redirect,
     url_for,
-    session
+    session,
+    send_file,
+    abort
 )
 
 from functools import wraps
@@ -13,75 +14,212 @@ from werkzeug.security import (
     generate_password_hash,
     check_password_hash
 )
-from werkzeug.middleware.proxy_fix import ProxyFix
 
-import sqlite3
+from sqlalchemy import (
+    create_engine,
+    Column,
+    String,
+    Integer,
+    LargeBinary,
+    Text
+)
+
+from sqlalchemy.orm import (
+    declarative_base,
+    sessionmaker
+)
+
+from sqlalchemy.exc import IntegrityError
+
 import qrcode
 import os
 import uuid
+import io
 
 
-# ==================================================
+# ============================================================
 # إعداد Flask
-# ==================================================
+# ============================================================
 
 app = Flask(__name__)
 
 app.secret_key = os.environ.get(
     "SECRET_KEY",
-    "CHANGE-THIS-SECRET-KEY"
-)
-
-app.wsgi_app = ProxyFix(
-    app.wsgi_app,
-    x_for=1,
-    x_proto=1,
-    x_host=1,
-    x_port=1,
-    x_prefix=1
+    "CHANGE-THIS-SECRET-KEY-123456789"
 )
 
 
-# ==================================================
-# إعدادات المشروع
-# ==================================================
+# ============================================================
+# إعداد قاعدة البيانات
+# ============================================================
 
-DATA_DIR = os.environ.get("DATA_DIR", ".")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
-DATABASE = os.path.join(
-    DATA_DIR,
-    "people.db"
+
+# Render أحيانًا يعطي الرابط بالشكل postgres://
+# SQLAlchemy الحديثة تحتاج postgresql://
+if DATABASE_URL:
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace(
+            "postgres://",
+            "postgresql://",
+            1
+        )
+
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True
+    )
+
+else:
+    # للاختبار المحلي فقط
+    engine = create_engine(
+        "sqlite:///people.db",
+        connect_args={
+            "check_same_thread": False
+        }
+    )
+
+
+SessionLocal = sessionmaker(
+    bind=engine,
+    expire_on_commit=False
 )
 
-UPLOAD_FOLDER = os.path.join(
-    DATA_DIR,
-    "uploads"
-)
-
-QR_FOLDER = os.path.join(
-    DATA_DIR,
-    "qr_codes"
-)
-
-os.makedirs(
-    DATA_DIR,
-    exist_ok=True
-)
-
-os.makedirs(
-    UPLOAD_FOLDER,
-    exist_ok=True
-)
-
-os.makedirs(
-    QR_FOLDER,
-    exist_ok=True
-)
+Base = declarative_base()
 
 
-# ==================================================
+# ============================================================
+# نموذج الأشخاص
+# ============================================================
+
+class Person(Base):
+
+    __tablename__ = "people"
+
+    id = Column(
+        String(32),
+        primary_key=True
+    )
+
+    name = Column(
+        String(200),
+        nullable=False
+    )
+
+    rank = Column(
+        String(200),
+        nullable=False
+    )
+
+    military_number = Column(
+        String(200),
+        nullable=False
+    )
+
+    blood_type = Column(
+        String(100),
+        nullable=True
+    )
+
+    national_id = Column(
+        String(200),
+        nullable=True
+    )
+
+    department = Column(
+        String(200),
+        nullable=True
+    )
+
+    photo_data = Column(
+        LargeBinary,
+        nullable=True
+    )
+
+    photo_mimetype = Column(
+        String(100),
+        nullable=True
+    )
+
+    qr_data = Column(
+        LargeBinary,
+        nullable=True
+    )
+
+
+# ============================================================
+# نموذج المستخدمين
+# ============================================================
+
+class User(Base):
+
+    __tablename__ = "users"
+
+    id = Column(
+        Integer,
+        primary_key=True,
+        autoincrement=True
+    )
+
+    username = Column(
+        String(100),
+        unique=True,
+        nullable=False
+    )
+
+    password_hash = Column(
+        Text,
+        nullable=False
+    )
+
+
+# ============================================================
+# إنشاء الجداول
+# ============================================================
+
+def init_database():
+
+    Base.metadata.create_all(
+        engine
+    )
+
+    db = SessionLocal()
+
+    try:
+
+        admin = (
+            db.query(User)
+            .filter_by(username="admin")
+            .first()
+        )
+
+        if not admin:
+
+            admin_password = os.environ.get(
+                "ADMIN_PASSWORD",
+                "admin123"
+            )
+
+            admin = User(
+                username="admin",
+                password_hash=generate_password_hash(
+                    admin_password
+                )
+            )
+
+            db.add(admin)
+
+            db.commit()
+
+    finally:
+
+        db.close()
+
+
+# ============================================================
 # حماية الصفحات
-# ==================================================
+# ============================================================
 
 def login_required(view):
 
@@ -94,95 +232,17 @@ def login_required(view):
                 url_for("login")
             )
 
-        return view(*args, **kwargs)
+        return view(
+            *args,
+            **kwargs
+        )
 
     return wrapped_view
 
 
-# ==================================================
-# إنشاء قاعدة البيانات
-# ==================================================
-
-def init_database():
-
-    conn = sqlite3.connect(
-        DATABASE
-    )
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS people (
-
-            id TEXT PRIMARY KEY,
-
-            name TEXT NOT NULL,
-
-            rank TEXT NOT NULL,
-
-            military_number TEXT NOT NULL,
-
-            blood_type TEXT,
-
-            national_id TEXT,
-
-            department TEXT,
-
-            photo TEXT,
-
-            qr_file TEXT
-
-        )
-    """)
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-            username TEXT UNIQUE NOT NULL,
-
-            password_hash TEXT NOT NULL
-
-        )
-    """)
-
-    admin = conn.execute(
-        """
-        SELECT id
-        FROM users
-        WHERE username = ?
-        """,
-        ("admin",)
-    ).fetchone()
-
-    if not admin:
-
-        password_hash = generate_password_hash(
-            "admin123"
-        )
-
-        conn.execute(
-            """
-            INSERT INTO users
-            (
-                username,
-                password_hash
-            )
-            VALUES (?, ?)
-            """,
-            (
-                "admin",
-                password_hash
-            )
-        )
-
-    conn.commit()
-
-    conn.close()
-
-
-# ==================================================
+# ============================================================
 # تسجيل الدخول
-# ==================================================
+# ============================================================
 
 @app.route(
     "/login",
@@ -202,54 +262,93 @@ def login():
             ""
         )
 
-        conn = sqlite3.connect(
-            DATABASE
-        )
+        db = SessionLocal()
 
-        conn.row_factory = sqlite3.Row
+        try:
 
-        user = conn.execute(
-            """
-            SELECT *
-            FROM users
-            WHERE username = ?
-            """,
-            (username,)
-        ).fetchone()
-
-        conn.close()
-
-        if user and check_password_hash(
-            user["password_hash"],
-            password
-        ):
-
-            session["user_id"] = user["id"]
-
-            session["username"] = user["username"]
-
-            return redirect(
-                url_for("home")
+            user = (
+                db.query(User)
+                .filter_by(username=username)
+                .first()
             )
 
+            if user and check_password_hash(
+                user.password_hash,
+                password
+            ):
+
+                session.clear()
+
+                session["user_id"] = user.id
+
+                session["username"] = user.username
+
+                return redirect(
+                    url_for("home")
+                )
+
+        finally:
+
+            db.close()
+
         return """
-        <div
-            style="
-            text-align:center;
-            font-family:Arial;
-            padding:40px;
-            "
+        <!DOCTYPE html>
+
+        <html lang="ar" dir="rtl">
+
+        <head>
+
+        <meta charset="UTF-8">
+
+        <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1"
         >
 
-            <h3>
-                اسم المستخدم أو كلمة المرور غير صحيحة
-            </h3>
+        <title>خطأ في تسجيل الدخول</title>
 
-            <a href="/login">
-                العودة
-            </a>
+        <style>
+
+        body {
+            font-family: Arial;
+            background: #f3f3f3;
+            padding: 30px;
+        }
+
+        .box {
+            max-width: 450px;
+            margin: auto;
+            background: white;
+            padding: 30px;
+            border-radius: 15px;
+            text-align: center;
+        }
+
+        a {
+            color: #222;
+        }
+
+        </style>
+
+        </head>
+
+        <body>
+
+        <div class="box">
+
+        <h3>
+        اسم المستخدم أو كلمة المرور غير صحيحة
+        </h3>
+
+        <a href="/login">
+        العودة إلى تسجيل الدخول
+        </a>
 
         </div>
+
+        </body>
+
+        </html>
         """, 401
 
     return """
@@ -273,11 +372,15 @@ def login():
 
 <style>
 
+* {
+    box-sizing: border-box;
+}
+
 body {
 
-    font-family: Arial;
+    font-family: Arial, sans-serif;
 
-    background: #f5f5f5;
+    background: #f3f3f3;
 
     padding: 30px;
 
@@ -285,17 +388,35 @@ body {
 
 .box {
 
-    max-width: 400px;
+    max-width: 430px;
 
-    margin: auto;
+    margin: 60px auto;
 
     background: white;
 
     padding: 30px;
 
-    border-radius: 12px;
+    border-radius: 15px;
 
-    box-shadow: 0 2px 10px #ccc;
+    box-shadow: 0 3px 15px rgba(0,0,0,.10);
+
+}
+
+h2 {
+
+    text-align: center;
+
+    margin-bottom: 25px;
+
+}
+
+label {
+
+    display: block;
+
+    margin-bottom: 7px;
+
+    font-weight: bold;
 
 }
 
@@ -303,11 +424,15 @@ input {
 
     width: 100%;
 
-    padding: 12px;
+    padding: 13px;
 
-    margin: 8px 0 15px;
+    margin-bottom: 18px;
 
-    box-sizing: border-box;
+    border: 1px solid #ccc;
+
+    border-radius: 8px;
+
+    font-size: 16px;
 
 }
 
@@ -315,7 +440,7 @@ button {
 
     width: 100%;
 
-    padding: 13px;
+    padding: 14px;
 
     background: #222;
 
@@ -323,9 +448,11 @@ button {
 
     border: none;
 
-    border-radius: 6px;
+    border-radius: 8px;
 
-    font-size: 16px;
+    font-size: 17px;
+
+    cursor: pointer;
 
 }
 
@@ -350,6 +477,7 @@ button {
 <input
     type="text"
     name="username"
+    autocomplete="username"
     required
 >
 
@@ -360,6 +488,7 @@ button {
 <input
     type="password"
     name="password"
+    autocomplete="current-password"
     required
 >
 
@@ -378,29 +507,27 @@ button {
 """
 
 
-# ==================================================
+# ============================================================
 # لوحة الإدارة
-# ==================================================
+# ============================================================
 
 @app.route("/")
 @login_required
 def home():
 
-    conn = sqlite3.connect(
-        DATABASE
-    )
+    db = SessionLocal()
 
-    conn.row_factory = sqlite3.Row
+    try:
 
-    people = conn.execute(
-        """
-        SELECT *
-        FROM people
-        ORDER BY rowid DESC
-        """
-    ).fetchall()
+        people = (
+            db.query(Person)
+            .order_by(Person.id.desc())
+            .all()
+        )
 
-    conn.close()
+    finally:
+
+        db.close()
 
     return render_template_string("""
 
@@ -418,7 +545,7 @@ def home():
 >
 
 <title>
-لوحة الإدارة
+لوحة إدارة الأشخاص
 </title>
 
 <style>
@@ -710,7 +837,7 @@ body {
     type="text"
     id="search"
     class="search"
-    placeholder="ابحث بالاسم أو النمرة العسكرية..."
+    placeholder="ابحث بالاسم أو النمرة العسكرية أو الرتبة..."
     onkeyup="searchPeople()"
 >
 
@@ -729,42 +856,39 @@ body {
 
 <div
     class="card person-card"
-    data-search="
-        {{ person['name'] }}
-        {{ person['military_number'] }}
-        {{ person['rank'] }}
-    "
+    data-search="{{ person.name }} {{ person.military_number }} {{ person.rank }} {{ person.department or '' }}"
 >
 
 <img
     class="photo"
-    src="/uploads/{{ person['photo'] }}"
+    src="/photo/{{ person.id }}"
+    alt="صورة {{ person.name }}"
 >
 
 <div class="name">
-{{ person['name'] }}
+{{ person.name }}
 </div>
 
 <div class="info">
 <strong>الرتبة:</strong>
-{{ person['rank'] }}
+{{ person.rank }}
 </div>
 
 <div class="info">
 <strong>النمرة:</strong>
-{{ person['military_number'] }}
+{{ person.military_number }}
 </div>
 
 <div class="info">
 <strong>الجهة:</strong>
-{{ person['department'] or '' }}
+{{ person.department or '' }}
 </div>
 
 <div class="buttons">
 
 <a
     class="small-btn qr-btn"
-    href="/qr/{{ person['qr_file'] }}"
+    href="/qr/{{ person.id }}"
     target="_blank"
 >
 عرض QR
@@ -772,7 +896,7 @@ body {
 
 <a
     class="small-btn"
-    href="/person/{{ person['id'] }}"
+    href="/person/{{ person.id }}"
     target="_blank"
 >
 عرض البيانات
@@ -780,14 +904,14 @@ body {
 
 <a
     class="small-btn"
-    href="/edit/{{ person['id'] }}"
+    href="/edit/{{ person.id }}"
 >
 تعديل
 </a>
 
 <form
     method="POST"
-    action="/delete/{{ person['id'] }}"
+    action="/delete/{{ person.id }}"
     onsubmit="return confirm('هل أنت متأكد من حذف هذا الشخص؟');"
 >
 
@@ -830,19 +954,19 @@ body {
 
 function searchPeople() {
 
-    let input =
+    const input =
         document
         .getElementById("search")
         .value
         .toLowerCase();
 
-    let cards =
+    const cards =
         document
         .querySelectorAll(".person-card");
 
     cards.forEach(function(card) {
 
-        let text =
+        const text =
             card
             .getAttribute("data-search")
             .toLowerCase();
@@ -865,9 +989,9 @@ function searchPeople() {
 """, people=people)
 
 
-# ==================================================
+# ============================================================
 # إضافة شخص
-# ==================================================
+# ============================================================
 
 @app.route("/add")
 @login_required
@@ -889,10 +1013,14 @@ def add_person():
 >
 
 <title>
-إضافة شخص
+إضافة شخص جديد
 </title>
 
 <style>
+
+* {
+    box-sizing: border-box;
+}
 
 body {
 
@@ -906,7 +1034,7 @@ body {
 
 .box {
 
-    max-width: 550px;
+    max-width: 600px;
 
     margin: auto;
 
@@ -916,6 +1044,24 @@ body {
 
     border-radius: 15px;
 
+    box-shadow: 0 3px 15px rgba(0,0,0,.10);
+
+}
+
+h2 {
+
+    margin-top: 0;
+
+}
+
+label {
+
+    display: block;
+
+    margin-bottom: 7px;
+
+    font-weight: bold;
+
 }
 
 input {
@@ -924,9 +1070,13 @@ input {
 
     padding: 12px;
 
-    margin: 7px 0 16px;
+    margin: 7px 0 17px;
 
-    box-sizing: border-box;
+    border: 1px solid #ccc;
+
+    border-radius: 8px;
+
+    font-size: 16px;
 
 }
 
@@ -934,7 +1084,7 @@ button {
 
     width: 100%;
 
-    padding: 13px;
+    padding: 14px;
 
     background: #222;
 
@@ -942,7 +1092,21 @@ button {
 
     border: none;
 
-    border-radius: 7px;
+    border-radius: 8px;
+
+    font-size: 16px;
+
+}
+
+.back {
+
+    display: block;
+
+    margin-top: 18px;
+
+    text-align: center;
+
+    color: #222;
 
 }
 
@@ -964,7 +1128,9 @@ button {
     enctype="multipart/form-data"
 >
 
-<label>الإسم:</label>
+<label>
+الإسم:
+</label>
 
 <input
     type="text"
@@ -972,7 +1138,9 @@ button {
     required
 >
 
-<label>الرتبة:</label>
+<label>
+الرتبة:
+</label>
 
 <input
     type="text"
@@ -980,7 +1148,9 @@ button {
     required
 >
 
-<label>النمرة العسكرية:</label>
+<label>
+النمرة العسكرية:
+</label>
 
 <input
     type="text"
@@ -988,33 +1158,41 @@ button {
     required
 >
 
-<label>فصيلة الدم:</label>
+<label>
+فصيلة الدم:
+</label>
 
 <input
     type="text"
     name="blood_type"
 >
 
-<label>الرقم الوطني:</label>
+<label>
+الرقم الوطني:
+</label>
 
 <input
     type="text"
     name="national_id"
 >
 
-<label>الجهة:</label>
+<label>
+الجهة:
+</label>
 
 <input
     type="text"
     name="department"
 >
 
-<label>الصورة الشخصية:</label>
+<label>
+الصورة الشخصية:
+</label>
 
 <input
     type="file"
     name="photo"
-    accept="image/*"
+    accept="image/jpeg,image/png,image/webp"
     required
 >
 
@@ -1024,9 +1202,10 @@ button {
 
 </form>
 
-<br>
-
-<a href="/">
+<a
+    href="/"
+    class="back"
+>
 ← العودة إلى لوحة الإدارة
 </a>
 
@@ -1039,9 +1218,9 @@ button {
 """
 
 
-# ==================================================
+# ============================================================
 # إنشاء الشخص و QR
-# ==================================================
+# ============================================================
 
 @app.route(
     "/create",
@@ -1098,43 +1277,51 @@ def create():
             400
         )
 
-    extension = os.path.splitext(
-        photo.filename
-    )[1].lower()
+    allowed_types = {
+        "image/jpeg",
+        "image/png",
+        "image/webp"
+    }
 
-    allowed_extensions = [
-        ".jpg",
-        ".jpeg",
-        ".png",
-        ".webp"
-    ]
-
-    if extension not in allowed_extensions:
+    if photo.mimetype not in allowed_types:
 
         return (
-            "نوع الصورة غير مدعوم",
+            "نوع الصورة غير مدعوم. استخدم JPG أو PNG أو WEBP.",
             400
         )
 
-    person_id = uuid.uuid4().hex[:12]
+    photo_bytes = photo.read()
 
-    photo_filename = (
-        person_id + extension
-    )
+    if not photo_bytes:
 
-    photo.save(
-        os.path.join(
-            UPLOAD_FOLDER,
-            photo_filename
+        return (
+            "الصورة فارغة",
+            400
         )
-    )
 
-    # رابط الموقع الحقيقي تلقائيًا
+    # حد أقصى 5 ميجابايت
+    if len(photo_bytes) > 5 * 1024 * 1024:
+
+        return (
+            "حجم الصورة كبير جدًا. الحد الأقصى 5 ميجابايت.",
+            400
+        )
+
+    person_id = uuid.uuid4().hex
+
+    # --------------------------------------------------------
+    # إنشاء رابط الشخص
+    # --------------------------------------------------------
+
     person_url = url_for(
         "person",
         person_id=person_id,
         _external=True
     )
+
+    # --------------------------------------------------------
+    # إنشاء QR
+    # --------------------------------------------------------
 
     qr = qrcode.QRCode(
         version=None,
@@ -1153,56 +1340,54 @@ def create():
 
     qr_image = qr.make_image()
 
-    qr_filename = (
-        person_id + ".png"
-    )
+    qr_buffer = io.BytesIO()
 
     qr_image.save(
-        os.path.join(
-            QR_FOLDER,
-            qr_filename
-        )
+        qr_buffer,
+        format="PNG"
     )
 
-    conn = sqlite3.connect(
-        DATABASE
-    )
+    qr_bytes = qr_buffer.getvalue()
 
-    conn.execute(
-        """
-        INSERT INTO people
-        (
-            id,
-            name,
-            rank,
-            military_number,
-            blood_type,
-            national_id,
-            department,
-            photo,
-            qr_file
+    # --------------------------------------------------------
+    # حفظ البيانات في قاعدة البيانات
+    # --------------------------------------------------------
+
+    db = SessionLocal()
+
+    try:
+
+        person = Person(
+            id=person_id,
+            name=name,
+            rank=rank,
+            military_number=military_number,
+            blood_type=blood_type,
+            national_id=national_id,
+            department=department,
+            photo_data=photo_bytes,
+            photo_mimetype=photo.mimetype,
+            qr_data=qr_bytes
         )
 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            person_id,
-            name,
-            rank,
-            military_number,
-            blood_type,
-            national_id,
-            department,
-            photo_filename,
-            qr_filename
+        db.add(person)
+
+        db.commit()
+
+    except Exception:
+
+        db.rollback()
+
+        return (
+            "حدث خطأ أثناء حفظ البيانات",
+            500
         )
-    )
 
-    conn.commit()
+    finally:
 
-    conn.close()
+        db.close()
 
-    return f"""
+    return render_template_string("""
 
 <!DOCTYPE html>
 
@@ -1221,50 +1406,166 @@ def create():
 تم إنشاء QR
 </title>
 
+<style>
+
+body {
+
+    font-family: Arial;
+
+    background: #f3f3f3;
+
+    padding: 25px;
+
+    text-align: center;
+
+}
+
+.box {
+
+    max-width: 600px;
+
+    margin: auto;
+
+    background: white;
+
+    padding: 30px;
+
+    border-radius: 15px;
+
+}
+
+.qr {
+
+    width: 300px;
+
+    max-width: 100%;
+
+    margin: 20px auto;
+
+}
+
+a {
+
+    display: block;
+
+    margin: 14px;
+
+    color: #222;
+
+}
+
+</style>
+
 </head>
 
-<body
-    style="
-    text-align:center;
-    font-family:Arial;
-    padding:30px;
-    "
->
+<body>
+
+<div class="box">
 
 <h2>
 تم إنشاء QR Code بنجاح ✅
 </h2>
 
+<p>
+يمكن الآن مسح هذا الكود من أي هاتف.
+</p>
+
 <img
-    src="/qr/{qr_filename}"
-    width="300"
+    class="qr"
+    src="/qr/{{ person_id }}"
 >
 
-<br><br>
+<br>
 
 <a
-    href="/person/{person_id}"
+    href="/person/{{ person_id }}"
     target="_blank"
 >
-فتح البيانات
+فتح بيانات الشخص
 </a>
-
-<br><br>
 
 <a href="/">
 العودة إلى لوحة الإدارة
 </a>
 
+</div>
+
 </body>
 
 </html>
 
-"""
+""", person_id=person_id)
 
 
-# ==================================================
+# ============================================================
+# عرض الصورة
+# ============================================================
+
+@app.route(
+    "/photo/<person_id>"
+)
+def photo(person_id):
+
+    db = SessionLocal()
+
+    try:
+
+        person = (
+            db.query(Person)
+            .filter_by(id=person_id)
+            .first()
+        )
+
+        if not person or not person.photo_data:
+
+            abort(404)
+
+        return send_file(
+            io.BytesIO(person.photo_data),
+            mimetype=person.photo_mimetype or "image/jpeg"
+        )
+
+    finally:
+
+        db.close()
+
+
+# ============================================================
+# عرض QR
+# ============================================================
+
+@app.route(
+    "/qr/<person_id>"
+)
+def qr(person_id):
+
+    db = SessionLocal()
+
+    try:
+
+        person = (
+            db.query(Person)
+            .filter_by(id=person_id)
+            .first()
+        )
+
+        if not person or not person.qr_data:
+
+            abort(404)
+
+        return send_file(
+            io.BytesIO(person.qr_data),
+            mimetype="image/png"
+        )
+
+    finally:
+
+        db.close()
+
+
+# ============================================================
 # تعديل شخص
-# ==================================================
+# ============================================================
 
 @app.route(
     "/edit/<person_id>",
@@ -1273,107 +1574,117 @@ def create():
 @login_required
 def edit_person(person_id):
 
-    conn = sqlite3.connect(
-        DATABASE
-    )
+    db = SessionLocal()
 
-    conn.row_factory = sqlite3.Row
+    try:
 
-    person_data = conn.execute(
-        """
-        SELECT *
-        FROM people
-        WHERE id = ?
-        """,
-        (person_id,)
-    ).fetchone()
-
-    conn.close()
-
-    if not person_data:
-
-        return (
-            "الشخص غير موجود",
-            404
+        person = (
+            db.query(Person)
+            .filter_by(id=person_id)
+            .first()
         )
 
-    if request.method == "POST":
-
-        name = request.form.get(
-            "name",
-            ""
-        ).strip()
-
-        rank = request.form.get(
-            "rank",
-            ""
-        ).strip()
-
-        military_number = request.form.get(
-            "military_number",
-            ""
-        ).strip()
-
-        blood_type = request.form.get(
-            "blood_type",
-            ""
-        ).strip()
-
-        national_id = request.form.get(
-            "national_id",
-            ""
-        ).strip()
-
-        department = request.form.get(
-            "department",
-            ""
-        ).strip()
-
-        if not name or not rank or not military_number:
+        if not person:
 
             return (
-                "الاسم والرتبة والنمرة العسكرية مطلوبة",
-                400
+                "الشخص غير موجود",
+                404
             )
 
-        conn = sqlite3.connect(
-            DATABASE
-        )
+        if request.method == "POST":
 
-        conn.execute(
-            """
-            UPDATE people
+            name = request.form.get(
+                "name",
+                ""
+            ).strip()
 
-            SET
-                name = ?,
-                rank = ?,
-                military_number = ?,
-                blood_type = ?,
-                national_id = ?,
-                department = ?
+            rank = request.form.get(
+                "rank",
+                ""
+            ).strip()
 
-            WHERE id = ?
-            """,
-            (
-                name,
-                rank,
-                military_number,
-                blood_type,
-                national_id,
-                department,
-                person_id
+            military_number = request.form.get(
+                "military_number",
+                ""
+            ).strip()
+
+            blood_type = request.form.get(
+                "blood_type",
+                ""
+            ).strip()
+
+            national_id = request.form.get(
+                "national_id",
+                ""
+            ).strip()
+
+            department = request.form.get(
+                "department",
+                ""
+            ).strip()
+
+            if not name or not rank or not military_number:
+
+                return (
+                    "الاسم والرتبة والنمرة العسكرية مطلوبة",
+                    400
+                )
+
+            person.name = name
+
+            person.rank = rank
+
+            person.military_number = military_number
+
+            person.blood_type = blood_type
+
+            person.national_id = national_id
+
+            person.department = department
+
+            # ------------------------------------------------
+            # تغيير الصورة اختياري
+            # ------------------------------------------------
+
+            new_photo = request.files.get(
+                "photo"
             )
-        )
 
-        conn.commit()
+            if new_photo and new_photo.filename:
 
-        conn.close()
+                allowed_types = {
+                    "image/jpeg",
+                    "image/png",
+                    "image/webp"
+                }
 
-        return redirect(
-            url_for("home")
-        )
+                if new_photo.mimetype not in allowed_types:
 
-    return render_template_string("""
+                    return (
+                        "نوع الصورة غير مدعوم",
+                        400
+                    )
+
+                new_photo_bytes = new_photo.read()
+
+                if len(new_photo_bytes) > 5 * 1024 * 1024:
+
+                    return (
+                        "حجم الصورة كبير جدًا. الحد الأقصى 5 ميجابايت.",
+                        400
+                    )
+
+                person.photo_data = new_photo_bytes
+
+                person.photo_mimetype = new_photo.mimetype
+
+            db.commit()
+
+            return redirect(
+                url_for("home")
+            )
+
+        return render_template_string("""
 
 <!DOCTYPE html>
 
@@ -1394,6 +1705,10 @@ def edit_person(person_id):
 
 <style>
 
+* {
+    box-sizing: border-box;
+}
+
 body {
 
     font-family: Arial;
@@ -1406,7 +1721,7 @@ body {
 
 .box {
 
-    max-width: 550px;
+    max-width: 600px;
 
     margin: auto;
 
@@ -1418,15 +1733,45 @@ body {
 
 }
 
+.photo {
+
+    display: block;
+
+    width: 160px;
+
+    height: 190px;
+
+    object-fit: cover;
+
+    margin: 15px auto 25px;
+
+    border-radius: 10px;
+
+}
+
+label {
+
+    display: block;
+
+    font-weight: bold;
+
+    margin-bottom: 7px;
+
+}
+
 input {
 
     width: 100%;
 
     padding: 12px;
 
-    margin: 7px 0 16px;
+    margin: 7px 0 17px;
 
-    box-sizing: border-box;
+    border: 1px solid #ccc;
+
+    border-radius: 8px;
+
+    font-size: 16px;
 
 }
 
@@ -1434,7 +1779,7 @@ button {
 
     width: 100%;
 
-    padding: 13px;
+    padding: 14px;
 
     background: #222;
 
@@ -1442,23 +1787,21 @@ button {
 
     border: none;
 
-    border-radius: 7px;
+    border-radius: 8px;
+
+    font-size: 16px;
 
 }
 
-.photo {
+.back {
 
     display: block;
 
-    width: 150px;
+    text-align: center;
 
-    height: 180px;
+    margin-top: 18px;
 
-    object-fit: cover;
-
-    margin: 15px auto;
-
-    border-radius: 10px;
+    color: #222;
 
 }
 
@@ -1476,54 +1819,79 @@ button {
 
 <img
     class="photo"
-    src="/uploads/{{ person_data['photo'] }}"
+    src="/photo/{{ person.id }}"
 >
 
-<form method="POST">
+<form
+    method="POST"
+    enctype="multipart/form-data"
+>
 
-<label>الإسم:</label>
+<label>
+الإسم:
+</label>
 
 <input
     name="name"
-    value="{{ person_data['name'] }}"
+    value="{{ person.name }}"
     required
 >
 
-<label>الرتبة:</label>
+<label>
+الرتبة:
+</label>
 
 <input
     name="rank"
-    value="{{ person_data['rank'] }}"
+    value="{{ person.rank }}"
     required
 >
 
-<label>النمرة العسكرية:</label>
+<label>
+النمرة العسكرية:
+</label>
 
 <input
     name="military_number"
-    value="{{ person_data['military_number'] }}"
+    value="{{ person.military_number }}"
     required
 >
 
-<label>فصيلة الدم:</label>
+<label>
+فصيلة الدم:
+</label>
 
 <input
     name="blood_type"
-    value="{{ person_data['blood_type'] or '' }}"
+    value="{{ person.blood_type or '' }}"
 >
 
-<label>الرقم الوطني:</label>
+<label>
+الرقم الوطني:
+</label>
 
 <input
     name="national_id"
-    value="{{ person_data['national_id'] or '' }}"
+    value="{{ person.national_id or '' }}"
 >
 
-<label>الجهة:</label>
+<label>
+الجهة:
+</label>
 
 <input
     name="department"
-    value="{{ person_data['department'] or '' }}"
+    value="{{ person.department or '' }}"
+>
+
+<label>
+تغيير الصورة الشخصية - اختياري:
+</label>
+
+<input
+    type="file"
+    name="photo"
+    accept="image/jpeg,image/png,image/webp"
 >
 
 <button type="submit">
@@ -1532,10 +1900,11 @@ button {
 
 </form>
 
-<br>
-
-<a href="/">
-← العودة
+<a
+    href="/"
+    class="back"
+>
+← العودة إلى لوحة الإدارة
 </a>
 
 </div>
@@ -1544,12 +1913,16 @@ button {
 
 </html>
 
-""", person_data=person_data)
+""", person=person)
+
+    finally:
+
+        db.close()
 
 
-# ==================================================
+# ============================================================
 # حذف شخص
-# ==================================================
+# ============================================================
 
 @app.route(
     "/delete/<person_id>",
@@ -1558,99 +1931,63 @@ button {
 @login_required
 def delete_person(person_id):
 
-    conn = sqlite3.connect(
-        DATABASE
-    )
+    db = SessionLocal()
 
-    conn.row_factory = sqlite3.Row
+    try:
 
-    person_data = conn.execute(
-        """
-        SELECT *
-        FROM people
-        WHERE id = ?
-        """,
-        (person_id,)
-    ).fetchone()
-
-    if not person_data:
-
-        conn.close()
-
-        return (
-            "الشخص غير موجود",
-            404
+        person = (
+            db.query(Person)
+            .filter_by(id=person_id)
+            .first()
         )
 
-    photo_path = os.path.join(
-        UPLOAD_FOLDER,
-        person_data["photo"]
-    )
+        if not person:
 
-    if os.path.exists(photo_path):
+            return (
+                "الشخص غير موجود",
+                404
+            )
 
-        os.remove(photo_path)
+        db.delete(person)
 
-    qr_path = os.path.join(
-        QR_FOLDER,
-        person_data["qr_file"]
-    )
+        db.commit()
 
-    if os.path.exists(qr_path):
+        return redirect(
+            url_for("home")
+        )
 
-        os.remove(qr_path)
+    finally:
 
-    conn.execute(
-        """
-        DELETE FROM people
-        WHERE id = ?
-        """,
-        (person_id,)
-    )
-
-    conn.commit()
-
-    conn.close()
-
-    return redirect(
-        url_for("home")
-    )
+        db.close()
 
 
-# ==================================================
-# عرض بيانات الشخص
-# ==================================================
+# ============================================================
+# عرض بيانات الشخص بواسطة QR
+# ============================================================
 
 @app.route(
     "/person/<person_id>"
 )
 def person(person_id):
 
-    conn = sqlite3.connect(
-        DATABASE
-    )
+    db = SessionLocal()
 
-    conn.row_factory = sqlite3.Row
+    try:
 
-    person_data = conn.execute(
-        """
-        SELECT *
-        FROM people
-        WHERE id = ?
-        """,
-        (person_id,)
-    ).fetchone()
-
-    conn.close()
-
-    if not person_data:
-
-        return (
-            "البيانات غير موجودة",
-            404
+        person_data = (
+            db.query(Person)
+            .filter_by(id=person_id)
+            .first()
         )
 
-    return render_template_string("""
+        if not person_data:
+
+            return (
+                "البيانات غير موجودة",
+                404
+            )
+
+        return render_template_string("""
 
 <!DOCTYPE html>
 
@@ -1671,19 +2008,37 @@ def person(person_id):
 
 <style>
 
+* {
+    box-sizing: border-box;
+}
+
 body {
 
-    font-family: Arial;
+    font-family: Arial, sans-serif;
 
-    max-width: 500px;
-
-    margin: 30px auto;
+    margin: 0;
 
     padding: 20px;
 
-    background: white;
+    background: #f5f5f5;
 
     color: #222;
+
+}
+
+.container {
+
+    max-width: 520px;
+
+    margin: 20px auto;
+
+    background: white;
+
+    padding: 25px;
+
+    border-radius: 16px;
+
+    box-shadow: 0 3px 15px rgba(0,0,0,.10);
 
 }
 
@@ -1703,9 +2058,9 @@ body {
 
 .header p {
 
-    margin: 5px 0;
+    margin: 7px 0;
 
-    font-weight: bold;
+    color: #666;
 
 }
 
@@ -1713,21 +2068,21 @@ body {
 
     display: block;
 
-    width: 180px;
+    width: 190px;
 
-    height: 220px;
+    height: 230px;
 
     object-fit: cover;
 
     margin: 0 auto 25px;
 
-    border-radius: 8px;
+    border-radius: 10px;
 
 }
 
 .row {
 
-    padding: 12px 0;
+    padding: 13px 0;
 
     border-bottom: 1px solid #ddd;
 
@@ -1741,33 +2096,13 @@ body {
 
 }
 
-.website {
-
-    text-align: center;
-
-    margin-top: 30px;
-
-    padding-top: 20px;
-
-    border-top: 1px solid #ddd;
-
-}
-
-.website a {
-
-    color: #222;
-
-    text-decoration: none;
-
-    font-weight: bold;
-
-}
-
 </style>
 
 </head>
 
 <body>
+
+<div class="container">
 
 <div class="header">
 
@@ -1783,7 +2118,8 @@ body {
 
 <img
     class="photo"
-    src="/uploads/{{ person_data['photo'] }}"
+    src="/photo/{{ person_data.id }}"
+    alt="صورة {{ person_data.name }}"
 >
 
 <div class="row">
@@ -1792,7 +2128,7 @@ body {
 الإسم:
 </span>
 
-{{ person_data['name'] }}
+{{ person_data.name }}
 
 </div>
 
@@ -1802,7 +2138,7 @@ body {
 الرتبة:
 </span>
 
-{{ person_data['rank'] }}
+{{ person_data.rank }}
 
 </div>
 
@@ -1812,7 +2148,7 @@ body {
 النمرة العسكرية:
 </span>
 
-{{ person_data['military_number'] }}
+{{ person_data.military_number }}
 
 </div>
 
@@ -1822,7 +2158,7 @@ body {
 فصيلة الدم:
 </span>
 
-{{ person_data['blood_type'] or '' }}
+{{ person_data.blood_type or '' }}
 
 </div>
 
@@ -1832,7 +2168,7 @@ body {
 الرقم الوطني:
 </span>
 
-{{ person_data['national_id'] or '' }}
+{{ person_data.national_id or '' }}
 
 </div>
 
@@ -1842,7 +2178,9 @@ body {
 الجهة:
 </span>
 
-{{ person_data['department'] or '' }}
+{{ person_data.department or '' }}
+
+</div>
 
 </div>
 
@@ -1852,40 +2190,14 @@ body {
 
 """, person_data=person_data)
 
+    finally:
 
-# ==================================================
-# الصور
-# ==================================================
-
-@app.route(
-    "/uploads/<filename>"
-)
-def uploads(filename):
-
-    return send_from_directory(
-        UPLOAD_FOLDER,
-        filename
-    )
+        db.close()
 
 
-# ==================================================
-# QR
-# ==================================================
-
-@app.route(
-    "/qr/<filename>"
-)
-def qr(filename):
-
-    return send_from_directory(
-        QR_FOLDER,
-        filename
-    )
-
-
-# ==================================================
+# ============================================================
 # تسجيل الخروج
-# ==================================================
+# ============================================================
 
 @app.route("/logout")
 def logout():
@@ -1897,12 +2209,16 @@ def logout():
     )
 
 
-# ==================================================
-# تشغيل البرنامج
-# ==================================================
+# ============================================================
+# تهيئة قاعدة البيانات
+# ============================================================
 
 init_database()
 
+
+# ============================================================
+# تشغيل البرنامج
+# ============================================================
 
 if __name__ == "__main__":
 
