@@ -2,3 +2,6 @@ Flask
 gunicorn
 qrcode
 Pillow
+SQLAlchemy
+psycopg2-binary
+Werkzeug
