@@ -515,10 +515,8 @@ def health():
     return "OK", 200
 
 
-@app.route("/")
-@login_required
-def home():
-    ...
+
+ 
 @app.route("/")
 @login_required
 def home():
