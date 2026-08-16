@@ -189,28 +189,32 @@ def init_database():
     try:
 
         admin = (
-            db.query(User)
-            .filter_by(username="admin")
-            .first()
+    db.query(User)
+    .filter_by(username="admin")
+    .first()
+)
+
+admin_password = os.environ.get(
+    "ADMIN_PASSWORD",
+    "admin123"
+)
+
+if not admin:
+    admin = User(
+        username="admin",
+        password_hash=generate_password_hash(
+            admin_password
         )
+    )
 
-        if not admin:
+    db.add(admin)
 
-            admin_password = os.environ.get(
-                "ADMIN_PASSWORD",
-                "admin123"
-            )
+else:
+    admin.password_hash = generate_password_hash(
+        admin_password
+    )
 
-            admin = User(
-                username="admin",
-                password_hash=generate_password_hash(
-                    admin_password
-                )
-            )
-
-            db.add(admin)
-
-            db.commit()
+db.commit()
 
     finally:
 
