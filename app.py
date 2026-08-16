@@ -179,13 +179,6 @@ class User(Base):
 # ============================================================
 
 def init_database():
-
-    Base.metadata.create_all(
-        engine
-    )
-
-    db = SessionLocal()
-
     try:
         admin = (
             db.query(User)
@@ -195,8 +188,8 @@ def init_database():
 
         admin_password = os.environ.get("ADMIN_PASSWORD")
 
-if not admin_password:
-    raise RuntimeError("ADMIN_PASSWORD environment variable is not set")
+        if not admin_password:
+            raise RuntimeError("ADMIN_PASSWORD environment variable is not set")
 
         if not admin:
             admin = User(
@@ -206,7 +199,6 @@ if not admin_password:
                 )
             )
             db.add(admin)
-
         else:
             admin.password_hash = generate_password_hash(
                 admin_password
