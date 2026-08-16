@@ -179,6 +179,7 @@ class User(Base):
 # ============================================================
 
 def init_database():
+    db = SessionLocal()
     try:
         admin = (
             db.query(User)
