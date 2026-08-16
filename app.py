@@ -193,10 +193,10 @@ def init_database():
             .first()
         )
 
-        admin_password = os.environ.get(
-            "ADMIN_PASSWORD",
-            "admin123"
-        )
+        admin_password = os.environ.get("ADMIN_PASSWORD")
+
+if not admin_password:
+    raise RuntimeError("ADMIN_PASSWORD environment variable is not set")
 
         if not admin:
             admin = User(
